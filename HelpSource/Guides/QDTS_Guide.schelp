@@ -1,7 +1,7 @@
 TITLE:: QDTS Guide
 summary:: Guide to Quadratic Distortion Tone Spectra synthesis
 categories:: Guides, UGens>Generators
-related:: Classes/QDTSSolver, Classes/QDTS
+related:: Classes/QDTSSolver, Classes/NQDTSSolver, Classes/QDTS, Classes/NQDTS
 
 SECTION:: Introduction
 
@@ -12,6 +12,13 @@ Kendall, G.S., Haworth, C., and Cadiz, R.F. (2014). emphasis::"Sound Synthesis w
 Gutiérrez, E., Haworth, C., and Cádiz, R. (2024). emphasis::"Generating Sonic Phantoms with Quadratic Difference Tone Spectrum Synthesis.":: Computer Music Journal 47(3):1-16.
 
 The technique exploits the nonlinear response of the human auditory system to produce perceived harmonics through the interaction of carefully tuned sinusoidal components. The listener hears "phantom" tones that exist only as distortion products within the cochlea.
+
+Two solver UGens are provided:
+
+LIST::
+## link::Classes/QDTSSolver:: -- iterative Newton method, runs asynchronously on the NRT thread. Supports N = 1-16 harmonics.
+## link::Classes/NQDTSSolver:: -- neural network forward pass, runs synchronously on the control-rate thread. Supports N = 5-16 harmonics. Based on trained models from the upstream link::https://github.com/cordutie/qdts:: repository by Gutiérrez, E. and Cádiz, R.
+::
 
 SECTION:: Theory
 
@@ -31,32 +38,59 @@ code::
 f_c, f_c + f_d, f_c + 2*f_d, f_c + 3*f_d, ...
 ::
 
-SUBSECTION:: Newton's Method
+SUBSECTION:: The Inverse Problem
 
-The link::Classes/QDTSSolver:: UGen solves a system of nonlinear equations to find amplitude coefficients (A_1, A_2, ... A_n) such that when the corresponding sinusoids are played together, the resulting quadratic distortion products approximate a target harmonic spectrum.
+Given N target harmonic amplitudes (the phantom spectrum the listener should perceive), the solver must find N+1 carrier amplitudes such that the quadratic distortion products of the carrier complex approximate the target spectrum. This is a nonlinear inverse problem: the forward function (carrier -> distortion products) is straightforward, but finding the carrier amplitudes that produce a desired distortion spectrum requires solving a system of nonlinear equations.
 
-The solver uses Newton's method with:
+SUBSECTION:: Newton Solver (QDTSSolver)
+
+link::Classes/QDTSSolver:: solves the system using Newton's method with:
 LIST::
-## Multiple random restarts for robustness
+## Multiple random restarts (up to 100) for robustness
 ## Perturbation strategies when convergence fails
+## Asynchronous execution on the NRT thread via code::DoAsynchronousCommand::
 ## Normalized output for consistent amplitude levels
 ::
 
-SUBSECTION:: Asynchronous Execution
+The solver runs off the audio thread, so there is a brief latency (~1 control block) before results appear. When targets change rapidly, the solver debounces to avoid flooding the NRT queue.
 
-The solver runs on the NRT (non-real-time) thread via code::DoAsynchronousCommand::. This design keeps the audio thread free from the Newton iteration workload, which can require up to 100 restarts with 33 iterations each.
+SUBSECTION:: Neural Solver (NQDTSSolver)
 
-Implications:
-LIST::
-## There is a brief latency (~1 control block) before results appear after synth creation
-## When targets change, the new solution arrives asynchronously
-## If targets change rapidly, the solver debounces to avoid flooding the NRT queue
-## The first control block outputs a default normalization value for A_1 and zeros for remaining amplitudes
+link::Classes/NQDTSSolver:: replaces the iterative solver with a trained neural network (HomogeneousInverse architecture from link::https://github.com/cordutie/qdts::). The network is a 3-layer MLP:
+
+code::
+Linear(N, 256) + SiLU -> Linear(256, 256) + ReLU -> Linear(256, 256) + ReLU -> Linear(256, N+1)
 ::
+
+The key insight is that the distortion function is homogeneous of degree 2: scaling input by lambda scales output by lambda squared. The network exploits this by normalizing the input to unit length and scaling the output by the square root of the input norm. This means the network only learns the mapping on the unit sphere.
+
+The neural solver:
+LIST::
+## Runs synchronously on the control-rate thread (no NRT dispatch, no latency)
+## Always produces deterministic output (no convergence failure)
+## Provides a continuous mapping from target space to carrier space (no branch jumping)
+## Supports optional Newton refinement iterations for hybrid mode
+## Carries embedded weights for N = 5-16 (one trained model per N value, ~6.5 MB)
+::
+
+SECTION:: Choosing a Solver
+
+TABLE::
+## strong::Property:: || strong::QDTSSolver (Newton):: || strong::NQDTSSolver (Neural)::
+## Thread || NRT async dispatch || Control-rate synchronous
+## Latency || ~1 control block || Same block
+## N range || 1-16 || 5-16
+## Convergence || Not guaranteed (restarts) || Always produces output
+## Dynamic targets || Branch jumping under rapid change || Smooth continuous mapping
+## Precision || High when converged || Good; hybrid mode approaches Newton
+## Best for || Static/slow targets, N < 5 || Dynamic morphing, real-time control
+::
+
+For most use cases with N >= 5, the neural solver is recommended. Use the Newton solver for N < 5 or when maximum precision on static targets is needed.
 
 SECTION:: Basic Usage
 
-SUBSECTION:: Simple Synthesis
+SUBSECTION:: Newton Solver
 
 code::
 s.boot;
@@ -66,7 +100,7 @@ s.boot;
     var numPartials = 4;
     var carrierPitch = 2500;
     var targetPitch = 100;
-    var targets = [1, 0.5, 0.33, 0.25]; // Sawtooth-like
+    var targets = [1, 0.5, 0.33, 0.25];
 
     var amps = QDTSSolver.kr(numPartials, *targets);
     var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
@@ -77,13 +111,33 @@ s.boot;
 )
 ::
 
+SUBSECTION:: Neural Solver
+
+code::
+(
+{
+    var numPartials = 8;
+    var carrierPitch = 2500;
+    var targetPitch = 150;
+    var targets = [1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12];
+
+    // refine: 0 = neural only, 3-5 = hybrid for higher precision
+    var amps = NQDTSSolver.kr(numPartials, 0, *targets);
+    var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+
+    Limiter.ar(sines.sum * 0.2, 0.9) ! 2
+}.play;
+)
+::
+
 SUBSECTION:: Understanding the Output
 
-QDTSSolver returns code::numHarmonics + 2:: values:
+Both solvers return code::numHarmonics + 2:: values:
 
 code::
 var amps = QDTSSolver.kr(4, 1, 0.5, 0.33, 0.25);
-// amps[0] = A_1 (normalized, always starts at 1/sqrt(n+1))
+// amps[0] = A_1 (normalized)
 // amps[1] = A_2
 // amps[2] = A_3
 // amps[3] = A_4
@@ -91,7 +145,7 @@ var amps = QDTSSolver.kr(4, 1, 0.5, 0.33, 0.25);
 // amps[5] = estimation error
 ::
 
-The estimation error indicates convergence quality. Values below 0.001 indicate good convergence.
+The output format is identical for both solvers, enabling drop-in replacement.
 
 SECTION:: Common Spectra
 
@@ -123,58 +177,32 @@ var targets = [1, 0.01, 0.11, 0.01, 0.04, 0.01, 0.02, 0.01];
 
 SECTION:: Instrumental Tone Synthesis
 
-QDTS can approximate characteristic instrumental timbres by setting target spectra that match the harmonic amplitude profiles of acoustic instruments. These are simplified static approximations of steady-state spectra. Real instruments have time-varying spectra, attack transients, register-dependent timbral shifts, and inharmonicity that are not captured here.
+QDTS can approximate characteristic instrumental timbres by setting target spectra that match the harmonic amplitude profiles of acoustic instruments. These are simplified static approximations of steady-state spectra.
 
-SUBSECTION:: Clarinet
-
-The clarinet (cylindrical closed bore) strongly favors odd harmonics. Even harmonics are suppressed due to the bore geometry. This produces the characteristic "hollow" quality.
+SUBSECTION:: Spectral Profiles
 
 code::
-// Clarinet: odd harmonics dominant
-var targets = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
-::
+// Clarinet: odd harmonics dominant (cylindrical closed bore)
+~clarinet = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
 
-SUBSECTION:: Oboe
+// Oboe: peak at H2-H3, gradual rolloff (conical bore, double reed)
+~oboe = [0.8, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25, 0.15];
 
-The oboe (conical bore, double reed) has all harmonics present with a characteristic peak around the 2nd-4th harmonics, giving it a penetrating, nasal quality.
-
-code::
-// Oboe: peak at H2-H3, gradual rolloff
-var targets = [0.8, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25, 0.15];
-::
-
-SUBSECTION:: Flute
-
-The flute is strongly fundamental-dominant with rapid spectral rolloff. The near-sinusoidal quality comes from the open cylindrical bore driven by an air jet.
-
-code::
 // Flute: fundamental dominant, steep rolloff
-var targets = [1.0, 0.3, 0.1, 0.03, 0.01, 0.01, 0.01, 0.01];
-::
+~flute = [1.0, 0.3, 0.1, 0.03, 0.01, 0.01, 0.01, 0.01];
 
-SUBSECTION:: Trumpet
-
-The trumpet has a rich harmonic spectrum with relatively slow rolloff. The cup mouthpiece and flared bell produce strong upper harmonics giving brilliant, projecting quality.
-
-code::
 // Trumpet: rich spectrum, slow rolloff
-var targets = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
-::
+~trumpet = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
 
-SUBSECTION:: Violin
-
-The violin has a complex harmonic structure. In mid-register sustained playing, the spectrum shows strong presence through the first 6-8 harmonics. Bowed string excitation maintains energy across a wide spectral range.
-
-code::
 // Violin: broad harmonic content
-var targets = [1.0, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15];
+~violin = [1.0, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15];
 ::
 
-SUBSECTION:: Instrumental SynthDef Example
+SUBSECTION:: Instrumental SynthDef (Neural Solver)
 
 code::
 (
-SynthDef(\qdtsInstrument, {|out = 0, carrierPitch = 2500, targetPitch = 220,
+SynthDef(\nqdtsInstrument, {|out = 0, carrierPitch = 2500, targetPitch = 220,
     amp = 0.2, gate = 1, atk = 0.02, dec = 0.1, sus = 0.8, rel = 0.3,
     vibRate = 0, vibDepth = 0,
     t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25,
@@ -183,10 +211,9 @@ SynthDef(\qdtsInstrument, {|out = 0, carrierPitch = 2500, targetPitch = 220,
     var numPartials = 8;
     var vibrato = SinOsc.kr(vibRate) * vibDepth;
     var pitch = carrierPitch + vibrato;
-
     var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
 
-    var amps = QDTSSolver.kr(numPartials,
+    var amps = NQDTSSolver.kr(numPartials, 0,
         t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01),
         t4.max(0.01), t5.max(0.01), t6.max(0.01), t7.max(0.01)
     );
@@ -199,7 +226,7 @@ SynthDef(\qdtsInstrument, {|out = 0, carrierPitch = 2500, targetPitch = 220,
 )
 
 // Clarinet
-x = Synth(\qdtsInstrument, [
+x = Synth(\nqdtsInstrument, [
     \targetPitch, 262, \vibRate, 4.5, \vibDepth, 6,
     \atk, 0.08, \sus, 0.9,
     \t0, 1.0,  \t1, 0.05, \t2, 0.75, \t3, 0.04,
@@ -208,7 +235,7 @@ x = Synth(\qdtsInstrument, [
 x.set(\gate, 0);
 
 // Trumpet
-x = Synth(\qdtsInstrument, [
+x = Synth(\nqdtsInstrument, [
     \targetPitch, 349, \vibRate, 5.5, \vibDepth, 8,
     \atk, 0.03, \sus, 0.9,
     \t0, 1.0, \t1, 0.9, \t2, 0.7, \t3, 0.6,
@@ -219,27 +246,25 @@ x.set(\gate, 0);
 
 SUBSECTION:: Timbre Morphing
 
-Because QDTS timbres are defined purely by target amplitude arrays, morphing between instruments is linear interpolation between their harmonic profiles.
+The neural solver handles continuous spectral interpolation without branch jumping. Because the mapping from target space to carrier space is a smooth, deterministic function, morphing between timbres produces continuous output.
 
 code::
 (
-// Define profiles
 ~clarinet = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
 ~trumpet  = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
 
-// Morph from clarinet to trumpet over 5 seconds
-x = Synth(\qdtsInstrument, [
+x = Synth(\nqdtsInstrument, [
     \targetPitch, 262, \vibRate, 5, \vibDepth, 6
 ]);
 
 fork {
-    100.do {|i|
-        var blend = i / 99;
+    200.do {|i|
+        var blend = i / 199;
         8.do {|k|
             var val = ~clarinet[k] + (blend * (~trumpet[k] - ~clarinet[k]));
-            x.set(("t" ++ k).asSymbol, val);
+            x.set(("t" ++ k).asSymbol, val.max(0.01));
         };
-        0.05.wait;
+        0.025.wait;
     };
     "Morph complete: clarinet -> trumpet".postln;
 };
@@ -247,6 +272,8 @@ fork {
 
 x.set(\gate, 0);
 ::
+
+NOTE:: The Newton solver (QDTSSolver) under rapid morphing can produce audible discontinuities because each solve may converge to a different solution branch. The neural solver avoids this entirely.
 
 SECTION:: Vowel and Speech Synthesis
 
@@ -268,60 +295,63 @@ TABLE::
 SUBSECTION:: Vowel Profiles (f0 = 150 Hz, 8 harmonics)
 
 code::
-// /a/ (father): energy at H4-H7 (near F1=730, F2=1090)
-var targets_a = [0.15, 0.3, 0.55, 0.85, 1.0, 0.7, 0.9, 0.5];
-
-// /i/ (see): energy at H2 (near F1=270), upper harmonics weak
-var targets_i = [0.3, 0.8, 0.2, 0.1, 0.08, 0.07, 0.06, 0.05];
-
-// /u/ (boot): energy at H2 and H5-H6 (near F1=300, F2=870)
-var targets_u = [0.6, 1.0, 0.35, 0.2, 0.5, 0.8, 0.3, 0.15];
-
-// /e/ (bed): energy at H3-H4 (near F1=530)
-var targets_e = [0.2, 0.4, 0.8, 1.0, 0.6, 0.3, 0.2, 0.15];
-
-// /o/ (go): energy at H3-H6 (near F1=570, F2=840)
-var targets_o = [0.25, 0.5, 0.75, 1.0, 0.85, 0.9, 0.4, 0.2];
+~vowels = Dictionary[
+    \a -> [0.15, 0.3, 0.55, 0.85, 1.0, 0.7, 0.9, 0.5],   // F1=730, F2=1090
+    \e -> [0.2, 0.4, 0.8, 1.0, 0.6, 0.3, 0.2, 0.15],      // F1=530, F2=1840
+    \i -> [0.3, 0.8, 0.2, 0.1, 0.08, 0.07, 0.06, 0.05],   // F1=270, F2=2290
+    \o -> [0.25, 0.5, 0.75, 1.0, 0.85, 0.9, 0.4, 0.2],    // F1=570, F2=840
+    \u -> [0.6, 1.0, 0.35, 0.2, 0.5, 0.8, 0.3, 0.15],     // F1=300, F2=870
+];
 ::
 
 NOTE:: These profiles are computed for f0 = 150 Hz. At different fundamentals, formant energy shifts across different harmonics.
 
-SUBSECTION:: Vowel Synthesis Example
+SUBSECTION:: Vowel Cycle Morph
+
+The neural solver enables smooth continuous morphing through all five vowel positions. Each transition interpolates linearly between formant amplitude profiles.
 
 code::
 (
-SynthDef(\qdtsVowel, {|out = 0, carrierPitch = 2500, targetPitch = 150,
-    amp = 0.2, gate = 1, atk = 0.05, dec = 0.1, sus = 0.8, rel = 0.2,
-    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25,
-    t4 = 0.2, t5 = 0.16, t6 = 0.14, t7 = 0.12|
+// Vowel cycle: /a/ -> /e/ -> /i/ -> /o/ -> /u/ -> /a/
+// 2 seconds per transition, 10 seconds total
 
-    var numPartials = 8;
-    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
+~vowels = Dictionary[
+    \a -> [0.15, 0.3, 0.55, 0.85, 1.0, 0.7, 0.9, 0.5],
+    \e -> [0.2, 0.4, 0.8, 1.0, 0.6, 0.3, 0.2, 0.15],
+    \i -> [0.3, 0.8, 0.2, 0.1, 0.08, 0.07, 0.06, 0.05],
+    \o -> [0.25, 0.5, 0.75, 1.0, 0.85, 0.9, 0.4, 0.2],
+    \u -> [0.6, 1.0, 0.35, 0.2, 0.5, 0.8, 0.3, 0.15],
+];
+~vowelSeq = [\a, \e, \i, \o, \u, \a];
 
-    var amps = QDTSSolver.kr(numPartials,
-        t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01),
-        t4.max(0.01), t5.max(0.01), t6.max(0.01), t7.max(0.01)
-    );
+x = Synth(\nqdtsInstrument, [
+    \targetPitch, 150, \carrierPitch, 2500,
+    \vibRate, 0, \vibDepth, 0
+]);
 
-    var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
-    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+fork {
+    var morphTime = 2.0;
+    var stepsPerMorph = 80;
+    var stepTime = morphTime / stepsPerMorph;
 
-    Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
-}).add;
+    (~vowelSeq.size - 1).do {|seg|
+        var from = ~vowels[~vowelSeq[seg]];
+        var to = ~vowels[~vowelSeq[seg + 1]];
+        "  /%/ -> /%/".format(~vowelSeq[seg], ~vowelSeq[seg + 1]).postln;
+
+        stepsPerMorph.do {|i|
+            var blend = i / (stepsPerMorph - 1);
+            8.do {|k|
+                var val = from[k] + (blend * (to[k] - from[k]));
+                x.set(("t" ++ k).asSymbol, val.max(0.01));
+            };
+            stepTime.wait;
+        };
+    };
+    "Vowel cycle complete.".postln;
+};
 )
 
-// /a/ (father)
-x = Synth(\qdtsVowel, [
-    \t0, 0.15, \t1, 0.3, \t2, 0.55, \t3, 0.85,
-    \t4, 1.0, \t5, 0.7, \t6, 0.9, \t7, 0.5
-]);
-x.set(\gate, 0);
-
-// /i/ (see)
-x = Synth(\qdtsVowel, [
-    \t0, 0.3, \t1, 0.8, \t2, 0.2, \t3, 0.1,
-    \t4, 0.08, \t5, 0.07, \t6, 0.06, \t7, 0.05
-]);
 x.set(\gate, 0);
 ::
 
@@ -336,26 +366,17 @@ Always clamp target values:
 code::
 var t0s = t0.max(0.01);
 var t1s = t1.max(0.01);
-// etc.
-::
-
-Or use clip for a range:
-
-code::
-var t0s = t0.clip(0.01, 2.0);
 ::
 
 SUBSECTION:: Single Solver Instance Pattern
 
-The link::Classes/QDTS:: helper class creates UGen graph nodes each time you call code::.solver::, code::.ar::, or code::.arFM::. In a SynthDef, call these methods only once and store the result.
-
-When using QDTSSolver directly, the same principle applies: one solver per target spectrum per SynthDef.
+The helper classes (link::Classes/QDTS::, link::Classes/NQDTS::) create UGen graph nodes each time you call code::.solver::, code::.ar::, or code::.arFM::. In a SynthDef, call these methods only once and store the result.
 
 code::
 // One solver, reuse its outputs
-var sol = QDTSSolver.kr(4, t0, t1, t2, t3);
-var amps = sol[0..4];
-var error = sol[5];
+var sol = NQDTSSolver.kr(8, 0, t0, t1, t2, t3, t4, t5, t6, t7);
+var amps = sol[0..8];
+var error = sol[9];
 ::
 
 SUBSECTION:: Using Limiter
@@ -366,13 +387,152 @@ code::
 Out.ar(out, Limiter.ar(signal, 0.9) ! 2);
 ::
 
-SUBSECTION:: CPU Considerations
+SUBSECTION:: NQDTSSolver refine Parameter
 
-LIST::
-## More harmonics = more CPU usage for synthesis (sinusoidal oscillators)
-## The solver itself runs on the NRT thread, so it does not burden the audio thread
-## For static spectra, the solver runs only once at synth creation
-## Dynamic spectra (LFO modulation, parameter automation) trigger re-solves, but the debouncing mechanism prevents excessive NRT workload
+The code::refine:: parameter controls how many Newton iterations run after the neural forward pass. It must be initial-rate (set at Synth creation, not modulatable):
+
+code::
+// In a SynthDef, use .ir for refine:
+var refine = \refine.ir(0);
+var amps = NQDTSSolver.kr(8, refine, *targets);
+
+// Set at creation time:
+Synth(\mySynth, [\refine, 5]);
+::
+
+SECTION:: Solver Comparison Examples
+
+SUBSECTION:: Error Comparison
+
+Run both solvers on the same target and compare estimation errors:
+
+code::
+(
+{
+    var n = 8;
+    var targets = [1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12];
+
+    var newton = QDTSSolver.kr(n, *targets);
+    var neural = NQDTSSolver.kr(n, 0, *targets);
+    var hybrid = NQDTSSolver.kr(n, 5, *targets);
+
+    newton[n + 1].poll(2, "Newton error  ");
+    neural[n + 1].poll(2, "Neural error  ");
+    hybrid[n + 1].poll(2, "Hybrid error  ");
+
+    DC.ar(0) ! 2
+}.play;
+)
+::
+
+SUBSECTION:: Dynamic Modulation
+
+The neural solver handles LFO-modulated targets without NRT latency or branch jumping:
+
+code::
+(
+{
+    var numPartials = 6;
+    var carrierPitch = 2500;
+    var targetPitch = 150;
+
+    var t0 = SinOsc.kr(0.1).range(0.5, 1.5);
+    var t1 = SinOsc.kr(0.15).range(0.1, 0.8);
+    var t2 = SinOsc.kr(0.2).range(0.1, 0.6);
+    var t3 = SinOsc.kr(0.25).range(0.05, 0.4);
+    var t4 = SinOsc.kr(0.3).range(0.05, 0.3);
+    var t5 = SinOsc.kr(0.35).range(0.05, 0.2);
+
+    var amps = NQDTSSolver.kr(numPartials, 0, t0, t1, t2, t3, t4, t5);
+    var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+
+    Limiter.ar(sines.sum * 0.2, 0.9) ! 2
+}.play;
+)
+::
+
+SUBSECTION:: Helper Classes
+
+Both link::Classes/QDTS:: and link::Classes/NQDTS:: provide the same high-level interface:
+
+code::
+// Newton solver
+{ QDTS.sawtooth(8, 150).ar(0.2) ! 2 }.play;
+
+// Neural solver
+{ NQDTS.sawtooth(8, 150).ar(0.2) ! 2 }.play;
+
+// Neural solver with refinement
+{ NQDTS.sawtooth(8, 150, refine: 5).ar(0.2) ! 2 }.play;
+
+// Presets: .sawtooth, .square, .triangle
+::
+
+SECTION:: Advanced Examples
+
+SUBSECTION:: Pattern Integration
+
+code::
+(
+SynthDef(\nqdtsNote, {|out = 0, freq = 440, amp = 0.2, gate = 1,
+    atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.3,
+    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25,
+    t4 = 0.2, t5 = 0.16, t6 = 0.14, t7 = 0.12|
+
+    var carrierPitch = freq * 4;
+    var targetPitch = freq;
+
+    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
+    var amps = NQDTSSolver.kr(8, 0,
+        t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01),
+        t4.max(0.01), t5.max(0.01), t6.max(0.01), t7.max(0.01));
+    var freqs = 9.collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = 9.collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+
+    Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
+}).add;
+)
+
+(
+Pbind(
+    \instrument, \nqdtsNote,
+    \degree, Pseq([0, 2, 4, 5, 7], inf),
+    \dur, 0.25,
+    \amp, 0.15,
+    \t1, Pwhite(0.1, 0.8),
+    \t2, Pwhite(0.1, 0.5),
+).play;
+)
+::
+
+SUBSECTION:: Spectral Envelope (Per-harmonic Dynamics)
+
+Different attack/decay times per harmonic create evolving timbres that approximate the transient behavior of acoustic instruments:
+
+code::
+(
+SynthDef(\nqdtsSpectralEnv, {|out = 0, carrierPitch = 3000, targetPitch = 100,
+    amp = 0.3, gate = 1|
+
+    var atkTimes = [0.01, 0.05, 0.1, 0.15, 0.2, 0.25];
+    var relTimes = [0.8, 0.6, 0.4, 0.3, 0.25, 0.2];
+
+    var envs = 6.collect {|i|
+        EnvGen.kr(Env.perc(atkTimes[i], relTimes[i]), gate)
+    };
+
+    var targets = [1, 0.6, 0.4, 0.25, 0.15, 0.1];
+    var amps = NQDTSSolver.kr(6, 0, *targets);
+
+    var freqs = 7.collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = 7.collect {|i| SinOsc.ar(freqs[i]) * amps[i] * envs[i.min(5)] };
+
+    Out.ar(out, Limiter.ar(sines.sum * amp, 0.9) ! 2);
+}).add;
+)
+
+Synth(\nqdtsSpectralEnv);
 ::
 
 SECTION:: Perceptual and Musical Considerations
@@ -395,14 +555,12 @@ SUBSECTION:: Amplitude Modulation
 Due to the quadratic nature of ADPs, amplitude modulation requires the strong::square root:: of the intended modulation depth:
 
 code::
-// To get modulation depth of 0.5 on the QDTS,
-// apply sqrt(0.5) to the carrier
 var mod = SinOsc.kr(1).range(0, 1).sqrt;
 ::
 
 SUBSECTION:: Continuous vs Transient Sounds
 
-Continuous sounds work better than transient ones. Since auditory streaming is an active, attentional process, continuous sounds enable the listener to "tune in" to the QDTS stream. This also aligns with the async solver: sustained notes give the solver time to converge before the listener needs to perceive the result.
+Continuous sounds work better than transient ones. Since auditory streaming is an active, attentional process, continuous sounds enable the listener to "tune in" to the QDTS stream.
 
 SUBSECTION:: Listening Fatigue
 
@@ -415,112 +573,16 @@ LIST::
 ## QDT spectra localize close to the head (like headphone reproduction)
 ## Nodes and antinodes in the room affect where QDTS is most audible
 ## Head movements can greatly affect audibility and lateralization
-## For low QDT frequencies, peaks appear at fixed physical locations
 ::
 
 NOTE:: Paradoxically, QDTs are easier to hear over loudspeakers than headphones, since over headphones both carrier and QDTS are close to the ear.
-
-SECTION:: Advanced Examples
-
-SUBSECTION:: Real-time Spectrum Morphing
-
-code::
-(
-SynthDef(\qdtsMorph, {|out = 0, carrierPitch = 2500, targetPitch = 100, amp = 0.2,
-    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
-
-    var amps = QDTSSolver.kr(4, t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01));
-    var freqs = 5.collect {|i| carrierPitch + (i * targetPitch) };
-    var sines = 5.collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
-
-    Out.ar(out, Limiter.ar(sines.sum * amp, 0.9) ! 2);
-}).add;
-)
-
-x = Synth(\qdtsMorph);
-
-// Gradually morph from sawtooth to square-ish
-(
-fork {
-    100.do {|i|
-        var t1 = 0.5 * (1 - (i/100)); // Fade out even harmonics
-        var t3 = 0.25 * (1 - (i/100));
-        x.set(\t1, t1.max(0.01), \t3, t3.max(0.01));
-        0.05.wait;
-    };
-}
-)
-
-x.free;
-::
-
-SUBSECTION:: Pattern Integration
-
-code::
-(
-SynthDef(\qdtsNote, {|out = 0, freq = 440, amp = 0.2, gate = 1,
-    atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.3,
-    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
-
-    var carrierPitch = freq * 4;
-    var targetPitch = freq;
-
-    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
-    var amps = QDTSSolver.kr(4, t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01));
-    var freqs = 5.collect {|i| carrierPitch + (i * targetPitch) };
-    var sines = 5.collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
-
-    Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
-}).add;
-)
-
-(
-Pbind(
-    \instrument, \qdtsNote,
-    \degree, Pseq([0, 2, 4, 5, 7], inf),
-    \dur, 0.25,
-    \amp, 0.15,
-    \t1, Pwhite(0.1, 0.8),
-    \t2, Pwhite(0.1, 0.5),
-).play;
-)
-::
-
-SUBSECTION:: Spectral Envelope (Per-harmonic Dynamics)
-
-Different attack/decay times per harmonic create evolving timbres that approximate the transient behavior of acoustic instruments.
-
-code::
-(
-SynthDef(\qdtsSpectralEnv, {|out = 0, carrierPitch = 3000, targetPitch = 100,
-    amp = 0.3, gate = 1|
-
-    var atkTimes = [0.01, 0.05, 0.1, 0.2, 0.3];
-    var relTimes = [0.8, 0.6, 0.4, 0.3, 0.2];
-
-    var envs = 5.collect {|i|
-        EnvGen.kr(Env.perc(atkTimes[i], relTimes[i]), gate)
-    };
-
-    var targets = [1, 0.6, 0.4, 0.25, 0.15];
-    var amps = QDTSSolver.kr(5, *targets);
-
-    var freqs = 6.collect {|i| carrierPitch + (i * targetPitch) };
-    var sines = 6.collect {|i| SinOsc.ar(freqs[i]) * amps[i] * envs[i.min(4)] };
-
-    Out.ar(out, Limiter.ar(sines.sum * amp, 0.9) ! 2);
-}).add;
-)
-
-Synth(\qdtsSpectralEnv, [\carrierPitch, 3000, \targetPitch, 100]);
-::
 
 SECTION:: References
 
 LIST::
 ## Gutiérrez, E., Haworth, C., and Cádiz, R. (2024). "Generating Sonic Phantoms with Quadratic Difference Tone Spectrum Synthesis." Computer Music Journal 47(3):1-16.
 ## Kendall, G.S., Haworth, C., and Cádiz, R.F. (2014). "Sound Synthesis with Auditory Distortion Products." Computer Music Journal 38(4).
-## Fletcher, N.H. and Rossing, T.D. (1998). The Physics of Musical Instruments. Springer.
+## Neural QDTS solver and trained models: link::https://github.com/cordutie/qdts::
 ## Peterson, G.E. and Barney, H.L. (1952). "Control Methods Used in a Study of the Vowels." Journal of the Acoustical Society of America 24(2):175-184.
 ## Bregman, A.S. (1990). Auditory Scene Analysis. MIT Press.
 ::
