@@ -1,21 +1,23 @@
 # QDTS_SC
 
-A SuperCollider UGen plugin for synthesising sounds using Auditory Distortion Products (ADPs).
+SuperCollider UGen plugins for synthesising sounds using Auditory Distortion Products (ADPs).
 
 ## Overview
 
-QDTS_SC implements a solver for the system of equations described in Kendall, Haworth and Cadiz (2014) and Gutierrez, Haworth and Cadiz (2024), enabling controlled generation of quadratic difference tone spectra. The solver calculates the precise amplitudes needed so that the nonlinear response of the cochlea produces a target harmonic spectrum as perceived "phantom tones".
+QDTS_SC implements solvers for the system of equations described in Kendall, Haworth and Cadiz (2014) and Gutierrez, Haworth and Cadiz (2024), enabling controlled generation of quadratic difference tone spectra. The solvers calculate the precise carrier amplitudes needed so that the nonlinear response of the cochlea produces a target harmonic spectrum as perceived "phantom tones".
 
-This is a SuperCollider port of the original Max/MSP implementation by Esteban Gutierrez and Rodrigo Cadiz.
+Based on the original Max/MSP implementation by Esteban Gutierrez and Rodrigo Cadiz. The neural network solver uses trained models from [cordutie/qdts](https://github.com/cordutie/qdts).
 
 ## Features
 
-- **QDTSSolver UGen** -- Newton's method solver with NRT thread offloading for dropout-free audio
-- **QDTS helper class** -- language-side convenience interface with waveform presets
-- **Dynamic spectrum control** -- modulate target harmonics in real time
+- **QDTSSolver** -- Newton's method solver, NRT async dispatch, N = 1-16
+- **NQDTSSolver** -- neural network solver, synchronous control-rate, N = 5-16
+- **Hybrid mode** -- neural initial guess + Newton refinement iterations
+- **QDTS / NQDTS helper classes** -- language-side convenience interface with waveform presets
+- **Dynamic spectrum control** -- modulate target harmonics in real time (neural solver handles rapid changes without branch jumping)
 - **Normalised output** -- amplitudes are normalised for safe mixing
 - **Error output** -- monitor solver convergence quality
-- **No external dependencies** -- self-contained C++ (no Eigen required)
+- **No external dependencies** -- self-contained C++ with embedded neural network weights
 
 ## Installation
 
@@ -34,12 +36,15 @@ Platform.userExtensionDir
 ```
 Extensions/
   QDTS_SC/
-    QDTSSolver.scx          <-- from bin/macos-arm64/
+    QDTSSolver.scx           <-- from bin/macos-arm64/
+    NQDTSSolver.scx          <-- from bin/macos-arm64/ (neural solver)
     QDTSSolver.sc            <-- from sc-classes/
+    NQDTSSolver.sc           <-- from sc-classes/
     HelpSource/
       Classes/
         QDTS.schelp
         QDTSSolver.schelp
+        NQDTSSolver.schelp
       Guides/
         QDTS_Guide.schelp
 ```
@@ -49,8 +54,10 @@ Extensions/
 4. Verify:
 
 ```supercollider
-QDTSSolver.class;  // -> QDTSSolver
-QDTS.class;        // -> QDTS
+QDTSSolver.class;   // -> QDTSSolver
+NQDTSSolver.class;  // -> NQDTSSolver
+QDTS.class;         // -> QDTS
+NQDTS.class;        // -> NQDTS
 ```
 
 ### Building from source
@@ -66,9 +73,11 @@ cmake .. -DSC_PATH=/path/to/supercollider -DCMAKE_BUILD_TYPE=Release
 make -j$(sysctl -n hw.ncpu)
 ```
 
-The compiled plugin will be at `build/plugins/QDTSSolver.scx` (macOS) or `build/plugins/QDTSSolver.so` (Linux).
+The compiled plugins will be at `build/plugins/QDTSSolver.scx` and `build/plugins/NQDTSSolver.scx` (macOS) or `.so` (Linux).
 
-Then follow the same installation steps above, using the freshly built `.scx`/`.so` instead of the pre-built one.
+Then follow the same installation steps above, using the freshly built files instead of the pre-built ones.
+
+Note: NQDTSSolver embeds ~6.5 MB of neural network weights. The initial compilation of the weight data file takes ~30 seconds.
 
 ## Quick start
 
@@ -90,40 +99,67 @@ s.boot;
 
 ## Usage
 
-### QDTSSolver UGen
+### QDTSSolver -- Newton solver
 
 ```supercollider
 QDTSSolver.kr(numHarmonics, *targets)
 ```
 
-**Inputs:**
 - `numHarmonics` -- number of target harmonics (1--16, scalar)
-- `targets` -- array of target harmonic amplitudes (must match numHarmonics count)
+- `targets` -- target harmonic amplitudes
+- Returns `numHarmonics + 2` values: solved amplitudes + estimation error
+- Runs asynchronously on NRT thread
 
-**Outputs:** array of `numHarmonics + 2` values:
-- `[0]` to `[numHarmonics]` -- solved amplitudes (normalised)
-- `[numHarmonics + 1]` -- estimation error (lower = better convergence)
-
-### QDTS helper class
+### NQDTSSolver -- Neural solver
 
 ```supercollider
-// Presets
-{ Limiter.ar(QDTS.sawtooth(8, 440).ar(0.2), 0.9) ! 2 }.play;
-{ Limiter.ar(QDTS.square(8, 440).ar(0.2), 0.9) ! 2 }.play;
-{ Limiter.ar(QDTS.triangle(8, 440).ar(0.2), 0.9) ! 2 }.play;
+NQDTSSolver.kr(numHarmonics, refine, *targets)
+```
 
-// Custom targets
-~qdts = QDTS(8, 440);
-~qdts.targets = [1, 0.5, 0.33, 0.25, 0.2, 0.166, 0.142, 0.125];
-{ Limiter.ar(~qdts.ar(0.2), 0.9) ! 2 }.play;
+- `numHarmonics` -- number of target harmonics (5--16, scalar)
+- `refine` -- Newton refinement iterations after neural pass (0--16, scalar). Use 0 for pure neural, 3--5 for hybrid precision.
+- `targets` -- target harmonic amplitudes
+- Returns `numHarmonics + 2` values: solved amplitudes + estimation error (same format as QDTSSolver)
+- Runs synchronously on control-rate thread
+
+### Choosing a solver
+
+| | QDTSSolver (Newton) | NQDTSSolver (Neural) |
+|---|---|---|
+| Thread | NRT async | Control-rate sync |
+| N range | 1--16 | 5--16 |
+| Dynamic targets | Branch jumping | Smooth continuous |
+| Best for | Static targets, N < 5 | Morphing, real-time control |
+
+### Helper classes
+
+```supercollider
+// Newton solver
+{ QDTS.sawtooth(8, 440).ar(0.2) ! 2 }.play;
+
+// Neural solver
+{ NQDTS.sawtooth(8, 440).ar(0.2) ! 2 }.play;
+
+// Neural with refinement
+{ NQDTS.sawtooth(8, 440, refine: 5).ar(0.2) ! 2 }.play;
+
+// Presets: .sawtooth, .square, .triangle
 ```
 
 ## Architecture
 
-The solver runs on the NRT (non-real-time) thread via `DoAsynchronousCommand`. When target values change, the RT calc function dispatches an async command to the NRT thread, which runs the Newton solver without blocking audio. Results are copied back to the RT thread on completion. The first control block outputs zeros until the initial solve completes (typically within a few milliseconds).
+### QDTSSolver (Newton)
 
-This design ensures:
-- No audio dropouts during solver computation
+Runs on the NRT thread via `DoAsynchronousCommand`. When target values change, the RT calc function dispatches an async command to the NRT thread, which runs the Newton solver without blocking audio. Results are copied back to the RT thread on completion.
+
+### NQDTSSolver (Neural)
+
+Runs a trained 3-layer MLP (256 hidden units, SiLU/ReLU activations) directly on the control-rate thread. The forward pass takes ~20 microseconds, well within a single control block. Neural network weights from [cordutie/qdts](https://github.com/cordutie/qdts) are embedded as static arrays in the compiled plugin (~6.5 MB for 12 models, one per N=5..16).
+
+The network uses homogeneous scaling: input is normalised to unit length, output is scaled by sqrt(input norm). This allows the network to learn only the mapping on the unit sphere.
+
+Both solvers ensure:
+- No audio dropouts
 - No heap allocation in the audio thread
 - NaN/Inf protection on all outputs
 
@@ -158,15 +194,15 @@ See `examples/QDTS_examples.scd` for comprehensive usage including:
 - Real-time parameter control
 - LFO-modulated spectrum
 - Formant shaping (vowel-like sounds)
-- Beating and roughness effects
 - Spectral envelope (per-harmonic dynamics)
-- Pitch glide and vibrato
 - Instrumental tone synthesis (clarinet, oboe, flute, trumpet, violin)
 - Timbre morphing between instruments
 
 ## Verification
 
-The implementation has been verified against a Python reference solver. See `verification/` for test code.
+See `verification/` for test code:
+- `QDTS_verification.scd` -- QDTSSolver convergence and stability tests
+- `NQDTS_comparison.scd` -- comprehensive Newton vs Neural vs Hybrid comparison across standard spectra, instrumental profiles, vowel morphing, and dynamic modulation
 
 ### Convergence tests
 
@@ -190,10 +226,11 @@ The implementation has been verified against a Python reference solver. See `ver
 
 - Gutierrez, E., Haworth, C., and Cadiz, R. (2024). Generating Sonic Phantoms with Quadratic Difference Tone Spectrum Synthesis. *Computer Music Journal* 47(3):1--16.
 - Kendall, G.S., Haworth, C., and Cadiz, R.F. (2014). Sound Synthesis with Auditory Distortion Products. *Computer Music Journal* 38(4).
+- Neural QDTS solver and trained models: [cordutie/qdts](https://github.com/cordutie/qdts)
 
 ## Credits
 
-Original Max/MSP implementation and solver design: Esteban Gutierrez and Rodrigo Cadiz, based on the theoretical framework developed with Chris Haworth and Gary Kendall.
+Original Max/MSP implementation, solver design, and neural network training: Esteban Gutierrez and Rodrigo Cadiz, based on the theoretical framework developed with Chris Haworth and Gary Kendall.
 
 SuperCollider port: Marcin Pietruszewski
 
