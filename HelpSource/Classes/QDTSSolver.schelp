@@ -14,6 +14,12 @@ Kendall, G.S., Haworth, C., and Cádiz, R.F. (2014). emphasis::"Sound Synthesis 
 
 The solver runs at control rate and outputs normalized amplitude values that can be used to scale sinusoidal oscillators.
 
+SUBSECTION:: Asynchronous Execution
+
+The solver runs on the NRT (non-real-time) thread via code::DoAsynchronousCommand::. This prevents the Newton iteration from blocking the audio thread, which is critical for real-time stability. The consequence is a brief latency (approximately one control block) before results appear after synth creation or after target values change.
+
+When targets change rapidly, the solver debounces: it waits a few control blocks before dispatching a new solve, preventing queue flooding. If a solve is already in progress, new dispatches are suppressed until it completes.
+
 WARNING:: Avoid setting target values to exactly 0, as this can cause solver instability and produce loud output. Always use code::target.max(0.01):: or similar clamping.
 
 SUBSECTION:: Target Value Range
@@ -40,6 +46,15 @@ LIST::
 ## code::[0.1, 0.1, 1, 0.1]:: - 3rd harmonic dominant (nasal)
 ## code::[0.3, 0.3, 0.3, 1]:: - 4th harmonic dominant
 ## code::[0.5, 0.8, 1, 0.6]:: - Peak at 3rd, gradual rolloff
+::
+
+Instrumental spectral shapes (8 harmonics):
+LIST::
+## code::[1, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02]:: - Clarinet (odd harmonics)
+## code::[0.8, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25, 0.15]:: - Oboe (all harmonics, nasal)
+## code::[1, 0.3, 0.1, 0.03, 0.01, 0.01, 0.01, 0.01]:: - Flute (fundamental dominant)
+## code::[1, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]:: - Trumpet (rich, slow rolloff)
+## code::[1, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15]:: - Violin (complex, broad)
 ::
 
 CLASSMETHODS::
@@ -83,6 +98,7 @@ s.boot;
 }.play;
 )
 // Outputs: [amp0, amp1, amp2, amp3, amp4, error]
+// Note: results appear after brief async latency
 ::
 
 SUBSECTION:: Basic Synthesis
@@ -92,7 +108,7 @@ code::
 (
 {
     var numPartials = 4;
-    var carrierPitch = 1000;
+    var carrierPitch = 2500;
     var targetPitch = 100;
     var targets = [1, 0.5, 0.33, 0.25];
 
@@ -100,7 +116,7 @@ code::
     var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
     var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
 
-    sines.sum * 0.2 ! 2
+    Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
 ::
@@ -109,7 +125,7 @@ SUBSECTION:: SynthDef with Envelope
 
 code::
 (
-SynthDef(\qdtsEnv, {|out = 0, carrierPitch = 1280, targetPitch = 130,
+SynthDef(\qdtsEnv, {|out = 0, carrierPitch = 2500, targetPitch = 130,
     amp = 0.2, gate = 1, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.5,
     t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
 
@@ -129,7 +145,7 @@ SynthDef(\qdtsEnv, {|out = 0, carrierPitch = 1280, targetPitch = 130,
 )
 
 // Test
-x = Synth(\qdtsEnv, [\carrierPitch, 1000, \targetPitch, 100]);
+x = Synth(\qdtsEnv, [\carrierPitch, 2500, \targetPitch, 100]);
 x.set(\gate, 0); // Release
 ::
 
@@ -137,7 +153,7 @@ SUBSECTION:: Real-time Spectrum Morphing
 
 code::
 (
-SynthDef(\qdtsDynamic, {|out = 0, carrierPitch = 1280, targetPitch = 130, amp = 0.2,
+SynthDef(\qdtsDynamic, {|out = 0, carrierPitch = 2500, targetPitch = 130, amp = 0.2,
     t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
 
     var amps = QDTSSolver.kr(4, t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01));
@@ -158,32 +174,41 @@ x.set(\t0, 1, \t1, 0.1, \t2, 0.05, \t3, 0.02);  // Mellow
 x.free;
 ::
 
-SUBSECTION:: Pattern Example
+SUBSECTION:: Instrumental Tone (Clarinet)
 
 code::
 (
-SynthDef(\qdtsEnv, {|out = 0, carrierPitch = 1280, targetPitch = 130,
-    amp = 0.2, gate = 1, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.5,
-    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
+SynthDef(\qdtsClarinet, {|out = 0, carrierPitch = 2500, targetPitch = 220,
+    amp = 0.2, gate = 1|
 
-    var t0s = t0.max(0.01), t1s = t1.max(0.01);
-    var t2s = t2.max(0.01), t3s = t3.max(0.01);
+    var numPartials = 8;
+    // Clarinet: strong odd harmonics, suppressed even harmonics
+    var targets = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
 
-    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
-    var amps = QDTSSolver.kr(4, t0s, t1s, t2s, t3s);
-    var freqs = 5.collect {|i| carrierPitch + (i * targetPitch) };
-    var sines = 5.collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    var env = EnvGen.kr(Env.adsr(0.08, 0.05, 0.9, 0.15), gate, doneAction: 2);
+    var amps = QDTSSolver.kr(numPartials, *targets);
+    var vibrato = SinOsc.kr(4.5) * 6;
+    var pitch = carrierPitch + vibrato;
+    var freqs = (numPartials + 1).collect {|i| pitch + (i * targetPitch) };
+    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
 
     Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
 }).add;
 )
 
+x = Synth(\qdtsClarinet, [\targetPitch, 262]); // C4
+x.set(\gate, 0);
+::
+
+SUBSECTION:: Pattern Example
+
+code::
 (
 Pdef(\qdtsPattern,
     Pbind(
         \instrument, \qdtsEnv,
         \dur, Pseq([0.25, 0.25, 0.5, 0.25, 0.25, 0.25, 0.25], inf),
-        \carrierPitch, Pseq([800, 1000, 1200, 1600], inf),
+        \carrierPitch, Pseq([2500, 2800, 3000, 2300], inf),
         \targetPitch, Pwhite(60, 150),
         \amp, 0.15,
         \atk, 0.01,
@@ -205,7 +230,7 @@ SUBSECTION:: LFO-Modulated Spectrum
 
 code::
 (
-SynthDef(\qdtsLFO, {|out = 0, carrierPitch = 1280, targetPitch = 130, amp = 0.2|
+SynthDef(\qdtsLFO, {|out = 0, carrierPitch = 2500, targetPitch = 130, amp = 0.2|
     var t0 = LFNoise1.kr(0.5).range(0.5, 1);
     var t1 = LFNoise1.kr(0.3).range(0.1, 0.8);
     var t2 = LFNoise1.kr(0.4).range(0.05, 0.5);
@@ -220,6 +245,6 @@ SynthDef(\qdtsLFO, {|out = 0, carrierPitch = 1280, targetPitch = 130, amp = 0.2|
 )
 
 y = Synth(\qdtsLFO);
-y.set(\carrierPitch, 1000, \targetPitch, 80);
+y.set(\carrierPitch, 2500, \targetPitch, 80);
 y.free;
 ::

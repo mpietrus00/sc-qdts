@@ -9,11 +9,15 @@ cmake-build-*/
 *.swo
 *~
 
-# Compiled plugins (except in sc-classes for distribution)
+# Compiled plugins
+bin/
 *.so
 *.dylib
 *.dll
-!sc-classes/*.scx
+*.scx
+
+# Weight extraction intermediates
+plugins/NQDTSSolver/nqdts_weights.bin
 
 # OS files
 .DS_Store
@@ -22,3 +26,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# Tool config
+.claude/

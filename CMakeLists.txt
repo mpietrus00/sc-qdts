@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project(QDTS_SC VERSION 1.0.0 LANGUAGES CXX)
+project(QDTS_SC VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,19 +9,6 @@ set(SC_PATH "" CACHE PATH "Path to SuperCollider source")
 
 if(NOT SC_PATH)
     message(FATAL_ERROR "SC_PATH not set. Please provide path to SuperCollider source with -DSC_PATH=/path/to/supercollider")
-endif()
-
-# Find Eigen (any version 3.x+)
-find_package(Eigen3 REQUIRED NO_MODULE)
-if(NOT Eigen3_FOUND)
-    # Try pkg-config as fallback
-    find_package(PkgConfig)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(EIGEN3 eigen3)
-        if(EIGEN3_FOUND)
-            include_directories(${EIGEN3_INCLUDE_DIRS})
-        endif()
-    endif()
 endif()
 
 # Include SuperCollider plugin headers
@@ -45,16 +32,29 @@ add_library(QDTSSolver MODULE
     plugins/QDTSSolver/QDTSSolver.cpp
 )
 
-target_link_libraries(QDTSSolver PRIVATE Eigen3::Eigen)
-
 # Set output directory
 set_target_properties(QDTSSolver PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
     PREFIX ""
 )
 
+# Build the NQDTSSolver plugin (neural network solver)
+add_library(NQDTSSolver MODULE
+    plugins/NQDTSSolver/NQDTSSolver.cpp
+    plugins/NQDTSSolver/nqdts_weights_data.c
+)
+
+target_include_directories(NQDTSSolver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugins/NQDTSSolver
+)
+
+set_target_properties(NQDTSSolver PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+    PREFIX ""
+)
+
 # Installation
-install(TARGETS QDTSSolver
+install(TARGETS QDTSSolver NQDTSSolver
     LIBRARY DESTINATION "lib/SuperCollider/plugins"
 )
 

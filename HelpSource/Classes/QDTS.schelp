@@ -6,6 +6,40 @@ related:: Classes/QDTSSolver, Guides/QDTS_Guide
 DESCRIPTION::
 QDTS provides a convenient high-level interface for synthesizing sounds using Auditory Distortion Products. It wraps the link::Classes/QDTSSolver:: UGen with preset spectra and synthesis methods.
 
+WARNING::
+QDTS is a emphasis::language-side helper class::, not a UGen. Each call to code::.solver::, code::.ar::, code::.amplitudes::, or code::.arFM:: builds new UGen graph nodes in the SynthDef function. You should call these methods only strong::once:: per SynthDef and store the result in a variable. Calling them multiple times creates duplicate solver instances, wasting CPU and potentially producing different results.
+
+code::
+// CORRECT: single solver instance
+(
+{
+    var qdts = QDTS.sawtooth(8, 440);
+    var sig = qdts.ar(0.2);  // creates solver + synthesis
+    Limiter.ar(sig, 0.9) ! 2
+}.play;
+)
+
+// WRONG: calling .ar twice creates two separate solvers
+(
+{
+    var qdts = QDTS.sawtooth(8, 440);
+    var left = qdts.ar(0.2);   // solver instance 1
+    var right = qdts.ar(0.2);  // solver instance 2 (wasteful!)
+    Limiter.ar([left, right], 0.9)
+}.play;
+)
+
+// CORRECT: mono-to-stereo duplication
+(
+{
+    var qdts = QDTS.sawtooth(8, 440);
+    var sig = qdts.ar(0.2);
+    Limiter.ar(sig, 0.9) ! 2   // duplicate the mono signal
+}.play;
+)
+::
+::
+
 CLASSMETHODS::
 
 METHOD:: new
@@ -73,22 +107,12 @@ ARGUMENT:: value
 Amplitude value
 
 METHOD:: solver
-Get the raw QDTSSolver UGen output (amplitudes + error).
+Get the raw QDTSSolver UGen output (amplitudes + error). Creates a single solver UGen node. Call only once per SynthDef function.
 
 returns:: Array of control-rate signals
 
-METHOD:: amplitudes
-Get just the amplitude outputs (without error).
-
-returns:: Array of control-rate amplitude signals
-
-METHOD:: error
-Get the estimation error output.
-
-returns:: Control-rate error signal
-
 METHOD:: ar
-Synthesize audio using the solved amplitudes.
+Synthesize audio using the solved amplitudes. Creates a solver instance and synthesis graph internally. Call only once per SynthDef function.
 
 ARGUMENT:: amp
 Output amplitude. Default: 0.1
@@ -96,7 +120,7 @@ Output amplitude. Default: 0.1
 returns:: Audio-rate signal (mono)
 
 METHOD:: arFM
-Synthesize audio with frequency modulation.
+Synthesize audio with frequency modulation. Creates a solver instance and synthesis graph internally. Call only once per SynthDef function.
 
 ARGUMENT:: modFreq
 Modulation frequency in Hz. Default: 1
@@ -120,7 +144,7 @@ s.boot;
 (
 {
     var qdts = QDTS.sawtooth(8, 440);
-    qdts.ar(0.2) ! 2
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
 }.play;
 )
 
@@ -128,7 +152,7 @@ s.boot;
 (
 {
     var qdts = QDTS.square(8, 440);
-    qdts.ar(0.2) ! 2
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
 }.play;
 )
 
@@ -136,7 +160,7 @@ s.boot;
 (
 {
     var qdts = QDTS.triangle(8, 440);
-    qdts.ar(0.2) ! 2
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
 }.play;
 )
 ::
@@ -147,9 +171,9 @@ code::
 (
 {
     var qdts = QDTS(8, 220);
-    // Custom target spectrum
-    qdts.targets = [1, 0, 0.5, 0, 0.25, 0, 0.125, 0];
-    qdts.ar(0.2) ! 2
+    // Custom target spectrum (use max(0.01) for zero values)
+    qdts.targets = [1, 0.01, 0.5, 0.01, 0.25, 0.01, 0.125, 0.01];
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
 }.play;
 )
 ::
@@ -160,7 +184,38 @@ code::
 (
 {
     var qdts = QDTS.sawtooth(8, 440);
-    qdts.arFM(5, 10, 0.2) ! 2  // 5 Hz modulation, 10 Hz depth
+    Limiter.ar(qdts.arFM(5, 10, 0.2), 0.9) ! 2  // 5 Hz modulation, 10 Hz depth
+}.play;
+)
+::
+
+SUBSECTION:: Instrumental Tone Presets
+
+code::
+// Clarinet-like (odd harmonics dominant)
+(
+{
+    var qdts = QDTS(8, 262);
+    qdts.targets = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
+}.play;
+)
+
+// Trumpet-like (rich spectrum)
+(
+{
+    var qdts = QDTS(8, 349);
+    qdts.targets = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
+}.play;
+)
+
+// Flute-like (fundamental dominant)
+(
+{
+    var qdts = QDTS(8, 523);
+    qdts.targets = [1.0, 0.3, 0.1, 0.03, 0.01, 0.01, 0.01, 0.01];
+    Limiter.ar(qdts.ar(0.2), 0.9) ! 2
 }.play;
 )
 ::

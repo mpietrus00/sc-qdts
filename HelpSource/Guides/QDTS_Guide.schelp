@@ -9,7 +9,9 @@ QDTS_SC implements a synthesis technique based on Auditory Distortion Products (
 
 Kendall, G.S., Haworth, C., and Cadiz, R.F. (2014). emphasis::"Sound Synthesis with Auditory Distortion Products.":: Computer Music Journal 38(4).
 
-The technique exploits the nonlinear response of the human auditory system to produce perceived harmonics through the interaction of carefully tuned sinusoidal components.
+Gutiérrez, E., Haworth, C., and Cádiz, R. (2024). emphasis::"Generating Sonic Phantoms with Quadratic Difference Tone Spectrum Synthesis.":: Computer Music Journal 47(3):1-16.
+
+The technique exploits the nonlinear response of the human auditory system to produce perceived harmonics through the interaction of carefully tuned sinusoidal components. The listener hears "phantom" tones that exist only as distortion products within the cochlea.
 
 SECTION:: Theory
 
@@ -19,9 +21,9 @@ The synthesis model uses two pitch parameters:
 
 DEFINITIONLIST::
 ## Carrier Pitch (f_c)
-|| The base frequency of the synthesized sound
+|| The base frequency of the synthesized sound. Should be in the 1-5 kHz range where the ear's nonlinear response is strongest (optimal ~2.5 kHz).
 ## Target Pitch (f_d)
-|| The difference frequency between successive partials
+|| The difference frequency between successive partials. This is the pitch the listener perceives as the phantom fundamental.
 ::
 
 The resulting frequencies are:
@@ -40,6 +42,18 @@ LIST::
 ## Normalized output for consistent amplitude levels
 ::
 
+SUBSECTION:: Asynchronous Execution
+
+The solver runs on the NRT (non-real-time) thread via code::DoAsynchronousCommand::. This design keeps the audio thread free from the Newton iteration workload, which can require up to 100 restarts with 33 iterations each.
+
+Implications:
+LIST::
+## There is a brief latency (~1 control block) before results appear after synth creation
+## When targets change, the new solution arrives asynchronously
+## If targets change rapidly, the solver debounces to avoid flooding the NRT queue
+## The first control block outputs a default normalization value for A_1 and zeros for remaining amplitudes
+::
+
 SECTION:: Basic Usage
 
 SUBSECTION:: Simple Synthesis
@@ -50,7 +64,7 @@ s.boot;
 (
 {
     var numPartials = 4;
-    var carrierPitch = 1000;
+    var carrierPitch = 2500;
     var targetPitch = 100;
     var targets = [1, 0.5, 0.33, 0.25]; // Sawtooth-like
 
@@ -58,7 +72,7 @@ s.boot;
     var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
     var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
 
-    sines.sum * 0.2 ! 2
+    Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
 ::
@@ -107,6 +121,210 @@ code::
 var targets = [1, 0.01, 0.11, 0.01, 0.04, 0.01, 0.02, 0.01];
 ::
 
+SECTION:: Instrumental Tone Synthesis
+
+QDTS can approximate characteristic instrumental timbres by setting target spectra that match the harmonic amplitude profiles of acoustic instruments. These are simplified static approximations of steady-state spectra. Real instruments have time-varying spectra, attack transients, register-dependent timbral shifts, and inharmonicity that are not captured here.
+
+SUBSECTION:: Clarinet
+
+The clarinet (cylindrical closed bore) strongly favors odd harmonics. Even harmonics are suppressed due to the bore geometry. This produces the characteristic "hollow" quality.
+
+code::
+// Clarinet: odd harmonics dominant
+var targets = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
+::
+
+SUBSECTION:: Oboe
+
+The oboe (conical bore, double reed) has all harmonics present with a characteristic peak around the 2nd-4th harmonics, giving it a penetrating, nasal quality.
+
+code::
+// Oboe: peak at H2-H3, gradual rolloff
+var targets = [0.8, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25, 0.15];
+::
+
+SUBSECTION:: Flute
+
+The flute is strongly fundamental-dominant with rapid spectral rolloff. The near-sinusoidal quality comes from the open cylindrical bore driven by an air jet.
+
+code::
+// Flute: fundamental dominant, steep rolloff
+var targets = [1.0, 0.3, 0.1, 0.03, 0.01, 0.01, 0.01, 0.01];
+::
+
+SUBSECTION:: Trumpet
+
+The trumpet has a rich harmonic spectrum with relatively slow rolloff. The cup mouthpiece and flared bell produce strong upper harmonics giving brilliant, projecting quality.
+
+code::
+// Trumpet: rich spectrum, slow rolloff
+var targets = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
+::
+
+SUBSECTION:: Violin
+
+The violin has a complex harmonic structure. In mid-register sustained playing, the spectrum shows strong presence through the first 6-8 harmonics. Bowed string excitation maintains energy across a wide spectral range.
+
+code::
+// Violin: broad harmonic content
+var targets = [1.0, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15];
+::
+
+SUBSECTION:: Instrumental SynthDef Example
+
+code::
+(
+SynthDef(\qdtsInstrument, {|out = 0, carrierPitch = 2500, targetPitch = 220,
+    amp = 0.2, gate = 1, atk = 0.02, dec = 0.1, sus = 0.8, rel = 0.3,
+    vibRate = 0, vibDepth = 0,
+    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25,
+    t4 = 0.2, t5 = 0.16, t6 = 0.14, t7 = 0.12|
+
+    var numPartials = 8;
+    var vibrato = SinOsc.kr(vibRate) * vibDepth;
+    var pitch = carrierPitch + vibrato;
+
+    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
+
+    var amps = QDTSSolver.kr(numPartials,
+        t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01),
+        t4.max(0.01), t5.max(0.01), t6.max(0.01), t7.max(0.01)
+    );
+
+    var freqs = (numPartials + 1).collect {|i| pitch + (i * targetPitch) };
+    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+
+    Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
+}).add;
+)
+
+// Clarinet
+x = Synth(\qdtsInstrument, [
+    \targetPitch, 262, \vibRate, 4.5, \vibDepth, 6,
+    \atk, 0.08, \sus, 0.9,
+    \t0, 1.0,  \t1, 0.05, \t2, 0.75, \t3, 0.04,
+    \t4, 0.5,  \t5, 0.03, \t6, 0.3,  \t7, 0.02
+]);
+x.set(\gate, 0);
+
+// Trumpet
+x = Synth(\qdtsInstrument, [
+    \targetPitch, 349, \vibRate, 5.5, \vibDepth, 8,
+    \atk, 0.03, \sus, 0.9,
+    \t0, 1.0, \t1, 0.9, \t2, 0.7, \t3, 0.6,
+    \t4, 0.5, \t5, 0.4, \t6, 0.3, \t7, 0.2
+]);
+x.set(\gate, 0);
+::
+
+SUBSECTION:: Timbre Morphing
+
+Because QDTS timbres are defined purely by target amplitude arrays, morphing between instruments is linear interpolation between their harmonic profiles.
+
+code::
+(
+// Define profiles
+~clarinet = [1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02];
+~trumpet  = [1.0, 0.9, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2];
+
+// Morph from clarinet to trumpet over 5 seconds
+x = Synth(\qdtsInstrument, [
+    \targetPitch, 262, \vibRate, 5, \vibDepth, 6
+]);
+
+fork {
+    100.do {|i|
+        var blend = i / 99;
+        8.do {|k|
+            var val = ~clarinet[k] + (blend * (~trumpet[k] - ~clarinet[k]));
+            x.set(("t" ++ k).asSymbol, val);
+        };
+        0.05.wait;
+    };
+    "Morph complete: clarinet -> trumpet".postln;
+};
+)
+
+x.set(\gate, 0);
+::
+
+SECTION:: Vowel and Speech Synthesis
+
+Vowel quality is determined by formant frequencies, which are resonances of the vocal tract. By computing harmonic amplitude profiles that approximate formant peaks, QDTS can produce vowel-like timbres.
+
+SUBSECTION:: Formant Data
+
+Standard formant frequencies (adult male, Peterson & Barney 1952):
+
+TABLE::
+## strong::Vowel:: || strong::F1 (Hz):: || strong::F2 (Hz):: || strong::F3 (Hz)::
+## /a/ (father) || 730 || 1090 || 2440
+## /i/ (see) || 270 || 2290 || 3010
+## /u/ (boot) || 300 || 870 || 2240
+## /e/ (bed) || 530 || 1840 || 2480
+## /o/ (go) || 570 || 840 || 2410
+::
+
+SUBSECTION:: Vowel Profiles (f0 = 150 Hz, 8 harmonics)
+
+code::
+// /a/ (father): energy at H4-H7 (near F1=730, F2=1090)
+var targets_a = [0.15, 0.3, 0.55, 0.85, 1.0, 0.7, 0.9, 0.5];
+
+// /i/ (see): energy at H2 (near F1=270), upper harmonics weak
+var targets_i = [0.3, 0.8, 0.2, 0.1, 0.08, 0.07, 0.06, 0.05];
+
+// /u/ (boot): energy at H2 and H5-H6 (near F1=300, F2=870)
+var targets_u = [0.6, 1.0, 0.35, 0.2, 0.5, 0.8, 0.3, 0.15];
+
+// /e/ (bed): energy at H3-H4 (near F1=530)
+var targets_e = [0.2, 0.4, 0.8, 1.0, 0.6, 0.3, 0.2, 0.15];
+
+// /o/ (go): energy at H3-H6 (near F1=570, F2=840)
+var targets_o = [0.25, 0.5, 0.75, 1.0, 0.85, 0.9, 0.4, 0.2];
+::
+
+NOTE:: These profiles are computed for f0 = 150 Hz. At different fundamentals, formant energy shifts across different harmonics.
+
+SUBSECTION:: Vowel Synthesis Example
+
+code::
+(
+SynthDef(\qdtsVowel, {|out = 0, carrierPitch = 2500, targetPitch = 150,
+    amp = 0.2, gate = 1, atk = 0.05, dec = 0.1, sus = 0.8, rel = 0.2,
+    t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25,
+    t4 = 0.2, t5 = 0.16, t6 = 0.14, t7 = 0.12|
+
+    var numPartials = 8;
+    var env = EnvGen.kr(Env.adsr(atk, dec, sus, rel), gate, doneAction: 2);
+
+    var amps = QDTSSolver.kr(numPartials,
+        t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01),
+        t4.max(0.01), t5.max(0.01), t6.max(0.01), t7.max(0.01)
+    );
+
+    var freqs = (numPartials + 1).collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = (numPartials + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+
+    Out.ar(out, Limiter.ar(sines.sum * env * amp, 0.9) ! 2);
+}).add;
+)
+
+// /a/ (father)
+x = Synth(\qdtsVowel, [
+    \t0, 0.15, \t1, 0.3, \t2, 0.55, \t3, 0.85,
+    \t4, 1.0, \t5, 0.7, \t6, 0.9, \t7, 0.5
+]);
+x.set(\gate, 0);
+
+// /i/ (see)
+x = Synth(\qdtsVowel, [
+    \t0, 0.3, \t1, 0.8, \t2, 0.2, \t3, 0.1,
+    \t4, 0.08, \t5, 0.07, \t6, 0.06, \t7, 0.05
+]);
+x.set(\gate, 0);
+::
+
 SECTION:: Important Considerations
 
 SUBSECTION:: Avoiding Zero Targets
@@ -127,6 +345,19 @@ code::
 var t0s = t0.clip(0.01, 2.0);
 ::
 
+SUBSECTION:: Single Solver Instance Pattern
+
+The link::Classes/QDTS:: helper class creates UGen graph nodes each time you call code::.solver::, code::.ar::, or code::.arFM::. In a SynthDef, call these methods only once and store the result.
+
+When using QDTSSolver directly, the same principle applies: one solver per target spectrum per SynthDef.
+
+code::
+// One solver, reuse its outputs
+var sol = QDTSSolver.kr(4, t0, t1, t2, t3);
+var amps = sol[0..4];
+var error = sol[5];
+::
+
 SUBSECTION:: Using Limiter
 
 For safety, especially when experimenting, wrap output in a limiter:
@@ -138,10 +369,56 @@ Out.ar(out, Limiter.ar(signal, 0.9) ! 2);
 SUBSECTION:: CPU Considerations
 
 LIST::
-## More harmonics = more CPU usage
-## The solver recomputes when targets change
-## For static spectra, the solver only runs once at synth creation
+## More harmonics = more CPU usage for synthesis (sinusoidal oscillators)
+## The solver itself runs on the NRT thread, so it does not burden the audio thread
+## For static spectra, the solver runs only once at synth creation
+## Dynamic spectra (LFO modulation, parameter automation) trigger re-solves, but the debouncing mechanism prevents excessive NRT workload
 ::
+
+SECTION:: Perceptual and Musical Considerations
+
+SUBSECTION:: Carrier Frequency Range
+
+The carrier complex should sit in the ear's most sensitive frequency range of strong::1kHz-5kHz::. A carrier around 2.5kHz typically works well, though per-listener differences apply.
+
+SUBSECTION:: Number of Harmonics
+
+Synthesizing more than 16 QDT harmonics is unlikely to be effective because:
+LIST::
+## QDTs above ~1kHz have only a weak effect
+## More components make the carrier complex more audible as a competing stream
+## For instrumental tone approximation, 8 harmonics provides a good balance of timbral richness and solver reliability
+::
+
+SUBSECTION:: Amplitude Modulation
+
+Due to the quadratic nature of ADPs, amplitude modulation requires the strong::square root:: of the intended modulation depth:
+
+code::
+// To get modulation depth of 0.5 on the QDTS,
+// apply sqrt(0.5) to the carrier
+var mod = SinOsc.kr(1).range(0, 1).sqrt;
+::
+
+SUBSECTION:: Continuous vs Transient Sounds
+
+Continuous sounds work better than transient ones. Since auditory streaming is an active, attentional process, continuous sounds enable the listener to "tune in" to the QDTS stream. This also aligns with the async solver: sustained notes give the solver time to converge before the listener needs to perceive the result.
+
+SUBSECTION:: Listening Fatigue
+
+Durations of less than 2 minutes are advised to avoid temporary threshold shift (TTS). Exposure time depends on signal level and frequency range.
+
+SUBSECTION:: Spatial Considerations
+
+When listening over loudspeakers:
+LIST::
+## QDT spectra localize close to the head (like headphone reproduction)
+## Nodes and antinodes in the room affect where QDTS is most audible
+## Head movements can greatly affect audibility and lateralization
+## For low QDT frequencies, peaks appear at fixed physical locations
+::
+
+NOTE:: Paradoxically, QDTs are easier to hear over loudspeakers than headphones, since over headphones both carrier and QDTS are close to the ear.
 
 SECTION:: Advanced Examples
 
@@ -149,7 +426,7 @@ SUBSECTION:: Real-time Spectrum Morphing
 
 code::
 (
-SynthDef(\qdtsMorph, {|out = 0, carrierPitch = 1000, targetPitch = 100, amp = 0.2,
+SynthDef(\qdtsMorph, {|out = 0, carrierPitch = 2500, targetPitch = 100, amp = 0.2,
     t0 = 1, t1 = 0.5, t2 = 0.33, t3 = 0.25|
 
     var amps = QDTSSolver.kr(4, t0.max(0.01), t1.max(0.01), t2.max(0.01), t3.max(0.01));
@@ -209,53 +486,41 @@ Pbind(
 )
 ::
 
-SECTION:: Perceptual and Musical Considerations
+SUBSECTION:: Spectral Envelope (Per-harmonic Dynamics)
 
-SUBSECTION:: Carrier Frequency Range
-
-The carrier complex should sit in the ear's most sensitive frequency range of strong::1kHz-5kHz::. A carrier around 2.5kHz typically works well, though per-listener differences apply.
-
-SUBSECTION:: Number of Harmonics
-
-Synthesizing more than 16 QDT harmonics is unlikely to be effective because:
-LIST::
-## QDTs above ~1kHz have only a weak effect
-## More components make the carrier complex more audible as a competing stream
-::
-
-SUBSECTION:: Amplitude Modulation
-
-Due to the quadratic nature of ADPs, amplitude modulation requires the strong::square root:: of the intended modulation depth:
+Different attack/decay times per harmonic create evolving timbres that approximate the transient behavior of acoustic instruments.
 
 code::
-// To get modulation depth of 0.5 on the QDTS,
-// apply sqrt(0.5) ≈ 0.707 to the carrier
-var mod = SinOsc.kr(1).range(0, 1).sqrt;
+(
+SynthDef(\qdtsSpectralEnv, {|out = 0, carrierPitch = 3000, targetPitch = 100,
+    amp = 0.3, gate = 1|
+
+    var atkTimes = [0.01, 0.05, 0.1, 0.2, 0.3];
+    var relTimes = [0.8, 0.6, 0.4, 0.3, 0.2];
+
+    var envs = 5.collect {|i|
+        EnvGen.kr(Env.perc(atkTimes[i], relTimes[i]), gate)
+    };
+
+    var targets = [1, 0.6, 0.4, 0.25, 0.15];
+    var amps = QDTSSolver.kr(5, *targets);
+
+    var freqs = 6.collect {|i| carrierPitch + (i * targetPitch) };
+    var sines = 6.collect {|i| SinOsc.ar(freqs[i]) * amps[i] * envs[i.min(4)] };
+
+    Out.ar(out, Limiter.ar(sines.sum * amp, 0.9) ! 2);
+}).add;
+)
+
+Synth(\qdtsSpectralEnv, [\carrierPitch, 3000, \targetPitch, 100]);
 ::
-
-SUBSECTION:: Continuous vs Transient Sounds
-
-Continuous sounds work better than transient ones. Since auditory streaming is an active, attentional process, continuous sounds enable the listener to "tune in" to the QDTS stream.
-
-SUBSECTION:: Listening Fatigue
-
-Durations of less than 2 minutes are advised to avoid temporary threshold shift (TTS). Exposure time depends on signal level and frequency range.
-
-SUBSECTION:: Spatial Considerations
-
-When listening over loudspeakers:
-LIST::
-## QDT spectra localize close to the head (like headphone reproduction)
-## Nodes and antinodes in the room affect where QDTS is most audible
-## Head movements can greatly affect audibility and lateralization
-## For low QDT frequencies, peaks appear at fixed physical locations
-::
-
-NOTE:: Paradoxically, QDTs are easier to hear over loudspeakers than headphones, since over headphones both carrier and QDTS are close to the ear.
 
 SECTION:: References
 
 LIST::
 ## Gutiérrez, E., Haworth, C., and Cádiz, R. (2024). "Generating Sonic Phantoms with Quadratic Difference Tone Spectrum Synthesis." Computer Music Journal 47(3):1-16.
 ## Kendall, G.S., Haworth, C., and Cádiz, R.F. (2014). "Sound Synthesis with Auditory Distortion Products." Computer Music Journal 38(4).
+## Fletcher, N.H. and Rossing, T.D. (1998). The Physics of Musical Instruments. Springer.
+## Peterson, G.E. and Barney, H.L. (1952). "Control Methods Used in a Study of the Vowels." Journal of the Acoustical Society of America 24(2):175-184.
+## Bregman, A.S. (1990). Auditory Scene Analysis. MIT Press.
 ::

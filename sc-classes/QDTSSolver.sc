@@ -11,6 +11,8 @@
 
 QDTSSolver : MultiOutUGen {
     *kr { |numHarmonics = 8 ... targets|
+        // Clamp numHarmonics to match C++ side
+        numHarmonics = numHarmonics.asInteger.clip(1, 16);
         // Outputs: [A_1 (normalized), A_2, ..., A_n+1, error]
         // Total outputs = numHarmonics + 2
         ^this.multiNew('control', numHarmonics, *targets);
@@ -21,15 +23,20 @@ QDTSSolver : MultiOutUGen {
     }
 
     init { |... theInputs|
+        var n = theInputs[0].asInteger.clip(1, 16);
         inputs = theInputs;
-        // Outputs: n+1 amplitudes + 1 error = numHarmonics + 2
-        ^this.initOutputs(theInputs[0].asInteger + 2, 'control');
+        ^this.initOutputs(n + 2, 'control');
     }
 
     checkInputs {
         var numHarmonics = inputs[0];
         if(numHarmonics.rate != 'scalar') {
             ^"numHarmonics must be a scalar value";
+        };
+        // Verify target count matches numHarmonics
+        if((inputs.size - 1) != numHarmonics.asInteger.clip(1, 16)) {
+            ^"number of target inputs (%) must match numHarmonics (%)".format(
+                inputs.size - 1, numHarmonics.asInteger.clip(1, 16));
         };
         ^this.checkValidInputs;
     }
@@ -40,6 +47,10 @@ QDTSSolver : MultiOutUGen {
  *
  * This class provides a convenient way to synthesize sounds using
  * Auditory Distortion Products (ADPs).
+ *
+ * NOTE: QDTS is a language-side helper class, not a UGen. Each call to
+ * .solver, .ar, .amplitudes, or .error builds new UGen graph nodes.
+ * Use .ar or .solver once in a SynthDef function, not repeatedly.
  */
 
 QDTS {
@@ -79,35 +90,27 @@ QDTS {
     }
 
     // Get the solver UGen (returns array of [amplitudes, error])
+    // Creates a single QDTSSolver UGen node.
     solver {
         ^QDTSSolver.kr(numHarmonics, *targets);
     }
 
-    // Get just the amplitudes (without error)
-    amplitudes {
-        var sig = QDTSSolver.kr(numHarmonics, *targets);
-        ^sig[0..numHarmonics];
-    }
-
-    // Get the estimation error
-    error {
-        var sig = QDTSSolver.kr(numHarmonics, *targets);
-        ^sig[numHarmonics + 1];
-    }
-
-    // Synthesize audio using the solved amplitudes
-    // Returns a mix of sinusoids at harmonic frequencies
+    // Synthesize audio using the solved amplitudes.
+    // Uses a single solver instance internally.
     ar { |amp = 0.1|
-        var amps = this.amplitudes;
+        var sol = this.solver;
+        var amps = sol[0..numHarmonics];
         var sines = Array.fill(numHarmonics + 1, { |i|
             SinOsc.ar(baseFreq * (i + 1)) * amps[i];
         });
         ^Mix(sines) * amp;
     }
 
-    // Synthesize with frequency modulation
+    // Synthesize with frequency modulation.
+    // Uses a single solver instance internally.
     arFM { |modFreq = 1, modDepth = 0, amp = 0.1|
-        var amps = this.amplitudes;
+        var sol = this.solver;
+        var amps = sol[0..numHarmonics];
         var freqMod = SinOsc.kr(modFreq) * modDepth;
         var sines = Array.fill(numHarmonics + 1, { |i|
             SinOsc.ar((baseFreq + freqMod) * (i + 1)) * amps[i];
@@ -118,26 +121,25 @@ QDTS {
     // Common target spectra presets
 
     *sawtooth { |numHarmonics = 8, baseFreq = 440|
-        var qdts = this.new(numHarmonics, baseFreq);
-        qdts.targets = Array.fill(numHarmonics, { |i| 1.0 / (i + 1) });
-        ^qdts;
+        ^this.new(numHarmonics, baseFreq);
+        // Default init already sets sawtooth targets
     }
 
     *square { |numHarmonics = 8, baseFreq = 440|
         var qdts = this.new(numHarmonics, baseFreq);
-        qdts.targets = Array.fill(numHarmonics, { |i|
-            if((i + 1).odd) { 1.0 / (i + 1) } { 0 };
-        });
+        qdts.targets_(Array.fill(numHarmonics, { |i|
+            if((i + 1).odd) { 1.0 / (i + 1) } { 0.01 };
+        }));
         ^qdts;
     }
 
     *triangle { |numHarmonics = 8, baseFreq = 440|
         var qdts = this.new(numHarmonics, baseFreq);
-        qdts.targets = Array.fill(numHarmonics, { |i|
+        qdts.targets_(Array.fill(numHarmonics, { |i|
             if((i + 1).odd) {
-                ((-1) ** ((i) / 2)) / ((i + 1) ** 2);
-            } { 0 };
-        });
+                ((-1) ** ((i) / 2)).abs / ((i + 1) ** 2);
+            } { 0.01 };
+        }));
         ^qdts;
     }
 
