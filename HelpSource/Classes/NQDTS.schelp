@@ -1,0 +1,82 @@
+TITLE:: NQDTS
+summary:: High-level interface for neural QDTS synthesis
+categories:: UGens>Generators
+related:: Classes/NQDTSSolver, Classes/QDTS, Guides/QDTS_Guide
+
+DESCRIPTION::
+
+A convenience class for QDTS synthesis using the neural network solver. Drop-in replacement for link::Classes/QDTS:: that uses link::Classes/NQDTSSolver:: internally. Supports numHarmonics 5-16.
+
+For the full guide, see link::Guides/QDTS_Guide::.
+
+CLASSMETHODS::
+
+METHOD:: new
+
+ARGUMENT:: numHarmonics
+Number of target harmonics (5-16).
+
+ARGUMENT:: baseFreq
+Base frequency for the carrier complex (Hz).
+
+ARGUMENT:: refine
+Number of Newton refinement iterations after neural forward pass (0-16). Default 0.
+
+METHOD:: sawtooth
+Create with sawtooth (1/n) harmonic profile.
+
+METHOD:: square
+Create with square wave (odd harmonics) profile.
+
+METHOD:: triangle
+Create with triangle wave (odd harmonics, 1/n^2) profile.
+
+INSTANCEMETHODS::
+
+METHOD:: ar
+Synthesize audio output.
+
+ARGUMENT:: amp
+Output amplitude.
+
+METHOD:: arFM
+Synthesize with frequency modulation.
+
+ARGUMENT:: modFreq
+Modulation frequency (Hz).
+
+ARGUMENT:: modDepth
+Modulation depth (Hz).
+
+ARGUMENT:: amp
+Output amplitude.
+
+METHOD:: solver
+Get the raw NQDTSSolver UGen output (amplitudes + error).
+
+METHOD:: targets
+Get or set the target harmonic amplitude array.
+
+METHOD:: setTarget
+Set a single target harmonic by index.
+
+EXAMPLES::
+
+code::
+s.boot;
+
+// Presets
+{ NQDTS.sawtooth(8, 150).ar(0.2) ! 2 }.play;
+{ NQDTS.square(8, 150).ar(0.2) ! 2 }.play;
+{ NQDTS.triangle(8, 150).ar(0.2) ! 2 }.play;
+
+// With Newton refinement
+{ NQDTS.sawtooth(8, 150, refine: 5).ar(0.2) ! 2 }.play;
+
+// Custom targets
+(
+var nqdts = NQDTS(8, 150);
+nqdts.targets_([1.0, 0.05, 0.75, 0.04, 0.5, 0.03, 0.3, 0.02]); // clarinet
+{ nqdts.ar(0.2) ! 2 }.play;
+)
+::
