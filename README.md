@@ -6,7 +6,7 @@ SuperCollider UGen plugins for synthesising sounds using Auditory Distortion Pro
 
 QDTS_SC implements solvers for the system of equations described in Kendall, Haworth and Cadiz (2014) and Gutierrez, Haworth and Cadiz (2024), enabling controlled generation of quadratic difference tone spectra. The solvers calculate the precise carrier amplitudes needed so that the nonlinear response of the cochlea produces a target harmonic spectrum as perceived "phantom tones".
 
-Based on the original Max/MSP implementation by Esteban Gutierrez and Rodrigo Cadiz. The neural network solver uses trained models from [cordutie/qdts](https://github.com/cordutie/qdts).
+The Newton solver is ported from the original C++ implementation by Esteban Gutierrez and Rodrigo Cadiz ([cordutie/qdts](https://github.com/cordutie/qdts)). The neural solver uses their trained model weights with an original C++ forward pass (no ONNX Runtime dependency).
 
 ## Features
 
@@ -230,7 +230,7 @@ See `verification/` for test code:
 
 ## Credits
 
-Original Max/MSP implementation, solver design, and neural network training: Esteban Gutierrez and Rodrigo Cadiz, based on the theoretical framework developed with Chris Haworth and Gary Kendall.
+Original solver design, C++ implementation, and neural network training: Esteban Gutierrez and Rodrigo Cadiz, based on the theoretical framework developed with Chris Haworth and Gary Kendall.
 
 SuperCollider port: Marcin Pietruszewski
 
