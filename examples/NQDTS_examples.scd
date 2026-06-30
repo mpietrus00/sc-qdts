@@ -55,9 +55,9 @@ s.waitForBoot {
     var targetFreq = 150;
     var amps = NQDTSSolver.kr(n, 0, *targets);
     var error = amps[n + 1];
-    error.poll(2, "Error");
     var freqs = (n + 1).collect {|i| carrierFreq + (i * targetFreq) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    error.poll(2, "Error");
     Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
@@ -71,9 +71,9 @@ s.waitForBoot {
     var targetFreq = 150;
     var amps = NQDTSSolver.kr(n, 5, *targets); // refine = 5
     var error = amps[n + 1];
-    error.poll(2, "Hybrid error");
     var freqs = (n + 1).collect {|i| carrierFreq + (i * targetFreq) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    error.poll(2, "Hybrid error");
     Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
@@ -129,10 +129,10 @@ s.waitForBoot {
 { NQDTS.sawtooth(8, 150).ar(0.2) ! 2 }.play;
 )
 (
-{ NQDTS.square(8, 150).ar(0.2) ! 2 }.play;
+{ NQDTS.square(8, 1150).ar(0.2) ! 2 }.play;
 )
 (
-{ NQDTS.triangle(8, 150).ar(0.2) ! 2 }.play;
+{ NQDTS.triangle(8, 2150).ar(0.2) ! 2 }.play;
 )
 
 // ============================================================
@@ -166,7 +166,7 @@ SynthDef(\nqdtsInstr, { |out = 0, carrierFreq = 2500, targetFreq = 220,
 // -- 3a. Clarinet: odd harmonics dominant
 (
 ~x = Synth(\nqdtsInstr, [
-    \targetFreq, 262, \vibRate, 4.5, \vibDepth, 6,
+    \targetFreq, 62, \vibRate, 4.5, \vibDepth, 6,
     \atk, 0.08, \sus, 0.9,
     \t0, 1.0,  \t1, 0.05, \t2, 0.75, \t3, 0.04,
     \t4, 0.5,  \t5, 0.03, \t6, 0.3,  \t7, 0.02
@@ -601,9 +601,9 @@ fork {
     var targetFreq = 100;
     var amps = NQDTSSolver.kr(n, 0, *targets);
     var error = amps[n + 1];
-    error.poll(2, "N=12 error");
     var freqs = (n + 1).collect {|i| carrierFreq + (i * targetFreq) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    error.poll(2, "N=12 error");
     Limiter.ar(sines.sum * 0.15, 0.9) ! 2
 }.play;
 )
@@ -617,9 +617,9 @@ fork {
     var targetFreq = 80;
     var amps = NQDTSSolver.kr(n, 0, *targets);
     var error = amps[n + 1];
-    error.poll(2, "N=16 error");
     var freqs = (n + 1).collect {|i| carrierFreq + (i * targetFreq) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    error.poll(2, "N=16 error");
     Limiter.ar(sines.sum * 0.1, 0.9) ! 2
 }.play;
 )
@@ -687,9 +687,9 @@ fork {
     var n = 8;
     var targets = [1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12];
     var amps = NQDTSSolver.kr(n, 0, *targets);
-    amps[n + 1].poll(2, "Neural error");
     var freqs = (n + 1).collect {|i| 2500 + (i * 150) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    amps[n + 1].poll(2, "Neural error");
     Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
@@ -702,9 +702,9 @@ fork {
     var n = 8;
     var targets = [1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12];
     var amps = NQDTSSolver.kr(n, 5, *targets);
-    amps[n + 1].poll(2, "Hybrid error");
     var freqs = (n + 1).collect {|i| 2500 + (i * 150) };
     var sines = (n + 1).collect {|i| SinOsc.ar(freqs[i]) * amps[i] };
+    amps[n + 1].poll(2, "Hybrid error");
     Limiter.ar(sines.sum * 0.2, 0.9) ! 2
 }.play;
 )
